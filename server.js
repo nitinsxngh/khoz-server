@@ -3,8 +3,22 @@ const cors = require('cors');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
+const cookieParser = require('cookie-parser');
 const { permute } = require('./index.js');
 const NeverBounceVerificationService = require('./verificationService.js');
+
+// Import new modules
+const connectDB = require('./config/database');
+const {
+  generalLimiter,
+  authLimiter,
+  passwordResetLimiter,
+  corsOptions,
+  securityHeaders,
+  requestLogger,
+  errorHandler,
+  notFound
+} = require('./middleware/security');
 
 // Import fetch for Node.js
 const fetch = require('node-fetch');
@@ -13,7 +27,29 @@ const fetch = require('node-fetch');
 const verificationService = new NeverBounceVerificationService();
 
 const app = express();
-const port = 3001;
+const port = process.env.PORT || 3001;
+
+// Connect to MongoDB
+connectDB();
+
+// Security middleware
+app.use(securityHeaders);
+
+// CORS configuration
+app.use(cors(corsOptions));
+
+// Cookie parser
+app.use(cookieParser());
+
+// Body parser middleware
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Request logging
+app.use(requestLogger);
+
+// Rate limiting
+app.use(generalLimiter);
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
@@ -43,16 +79,26 @@ const upload = multer({
   }
 });
 
-// Configure CORS with specific options
-app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:3002', 'http://127.0.0.1:3002'],
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
-}));
+// Import and use authentication routes
+const authRoutes = require('./routes/auth');
 
-// Middleware to parse JSON
-app.use(express.json());
+// Apply rate limiting to auth routes
+app.use('/api/auth', authLimiter);
+app.use('/api/auth/forgot-password', passwordResetLimiter);
+app.use('/api/auth/reset-password', passwordResetLimiter);
+
+// Mount authentication routes
+app.use('/api/auth', authRoutes);
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Server is running',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
 
 // Perplexity API endpoint
 app.post('/api/perplexity', async (req, res) => {
@@ -202,8 +248,6 @@ Look for press releases, company websites, LinkedIn profiles, recent news articl
     });
   }
 });
-
-
 
 // Function to read domains from uploaded file
 function readDomainsFromFile(filePath) {
@@ -491,6 +535,17 @@ Expected format:
   };
 }
 
+// Fallback data generator for when Perplexity API fails
+function generateFallbackData(domain) {
+  return {
+    Founder: null,
+    CEO: null,
+    CTO: null,
+    COO: null,
+    note: `Fallback data generated for ${domain} due to API limitations`
+  };
+}
+
 // NeverBounce verification endpoint
 app.post('/api/smart-verify', async (req, res) => {
   try {
@@ -537,6 +592,12 @@ app.get('/api/verification-stats', (req, res) => {
   }
 });
 
+// Error handling middleware (must be last)
+app.use(notFound);
+app.use(errorHandler);
+
 app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+  console.log(`🚀 Server running on port ${port}`);
+  console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🔗 Health check: http://localhost:${port}/api/health`);
 });
