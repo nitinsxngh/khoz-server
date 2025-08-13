@@ -82,6 +82,10 @@ const upload = multer({
 // Import and use authentication routes
 const authRoutes = require('./routes/auth');
 
+// Import email discovery and verification routes
+const emailDiscoveryRoutes = require('./routes/emailDiscovery');
+const emailVerificationRoutes = require('./routes/emailVerification');
+
 // Apply rate limiting to auth routes
 app.use('/api/auth', authLimiter);
 app.use('/api/auth/forgot-password', passwordResetLimiter);
@@ -89,6 +93,10 @@ app.use('/api/auth/reset-password', passwordResetLimiter);
 
 // Mount authentication routes
 app.use('/api/auth', authRoutes);
+
+// Mount email discovery and verification routes
+app.use('/api/email-discovery', emailDiscoveryRoutes);
+app.use('/api/email-verification', emailVerificationRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
