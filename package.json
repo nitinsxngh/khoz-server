@@ -1,0 +1,21 @@
+{
+  "name": "email-permutator",
+  "version": "1.0.0",
+  "description": "Generate a list of emails based on a person's name and email domain.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "repository": "https://github.com/jacobgoh101/email-permutator",
+  "author": "Jacob Goh",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "form-data": "^4.0.4",
+    "multer": "^1.4.5-lts.1",
+    "neverbounce": "^5.0.5",
+    "node-fetch": "^2.7.0"
+  }
+}
