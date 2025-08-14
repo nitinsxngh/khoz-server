@@ -20,6 +20,9 @@ const {
   notFound
 } = require('./middleware/security');
 
+// Import email generation service
+const emailGenerationService = require('./services/emailGenerationService');
+
 // Import fetch for Node.js
 const fetch = require('node-fetch');
 
@@ -81,10 +84,7 @@ const upload = multer({
 
 // Import and use authentication routes
 const authRoutes = require('./routes/auth');
-
-// Import email discovery and verification routes
-const emailDiscoveryRoutes = require('./routes/emailDiscovery');
-const emailVerificationRoutes = require('./routes/emailVerification');
+const emailGenerationRoutes = require('./routes/emailGeneration');
 
 // Apply rate limiting to auth routes
 app.use('/api/auth', authLimiter);
@@ -94,9 +94,8 @@ app.use('/api/auth/reset-password', passwordResetLimiter);
 // Mount authentication routes
 app.use('/api/auth', authRoutes);
 
-// Mount email discovery and verification routes
-app.use('/api/email-discovery', emailDiscoveryRoutes);
-app.use('/api/email-verification', emailVerificationRoutes);
+// Mount email generation routes
+app.use('/api/email-generation', emailGenerationRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -290,26 +289,57 @@ app.post('/permute', upload.single('domainFile'), async (req, res) => {
           .filter(line => line && !line.startsWith('#') && line.includes('.'))
           .map(line => line.toLowerCase());
         
-        console.log('Domains from file:', domainsFromFile);
+        console.log('Domains from uploaded file:', domainsFromFile);
       } catch (fileError) {
         console.error('Error reading file:', fileError);
         return res.status(400).json({ error: 'Error reading uploaded file' });
       }
     }
+    
+    // Also check for domains sent as form field
+    if (req.body.domainsFromFile && typeof req.body.domainsFromFile === 'string') {
+      try {
+        const formDomains = req.body.domainsFromFile
+          .split(',')
+          .map(domain => domain.trim())
+          .filter(domain => domain && domain.includes('.') && !domain.startsWith('#'))
+          .map(domain => domain.toLowerCase());
+        
+        console.log('Domains from form field:', formDomains);
+        
+        // Combine domains from file and form field
+        domainsFromFile = [...new Set([...domainsFromFile, ...formDomains])];
+      } catch (parseError) {
+        console.error('Error parsing domains from form field:', parseError);
+      }
+    }
+    
+    console.log('Final combined domains:', domainsFromFile);
 
     // Check if we have multiple domains to process
     const hasMultipleDomains = domainsFromFile.length > 0;
     
     if (hasMultipleDomains) {
       // Process multiple domains
-      const results = await processMultipleDomains(req.body, domainsFromFile, req.file);
-      
-      // Clean up uploaded file
-      if (req.file && fs.existsSync(req.file.path)) {
-        fs.unlinkSync(req.file.path);
+      try {
+        const results = await processMultipleDomains(req.body, domainsFromFile, req.file, req.user?.id);
+        
+        console.log('🔍 Results returned from processMultipleDomains:', {
+          type: typeof results,
+          keys: Object.keys(results || {}),
+          hasGlobalEmails: results && 'globalEmails' in results
+        });
+        
+        // Clean up uploaded file
+        if (req.file && fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+        }
+        
+        res.json(results);
+      } catch (error) {
+        console.error('❌ Error in processMultipleDomains:', error);
+        res.status(500).json({ error: 'Multi-domain processing failed', details: error.message });
       }
-      
-      res.json(results);
     } else {
       // Single domain processing (existing logic)
       const data = {
@@ -329,17 +359,29 @@ app.post('/permute', upload.single('domainFile'), async (req, res) => {
 
       console.log('Processed data for permute:', data);
 
-      // Generate emails
-      const emails = permute(data);
-      
-      console.log('Generated emails:', emails);
+      try {
+        // Generate emails without creating a database record
+        const result = await emailGenerationService.generateEmails(data, req.user ? req.user.id : null);
+        
+        console.log('Generated emails:', result.emails);
 
-      // Clean up uploaded file
-      if (req.file && fs.existsSync(req.file.path)) {
-        fs.unlinkSync(req.file.path);
+        // Clean up uploaded file
+        if (req.file && fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+        }
+
+        // Return response with generated emails (no session ID)
+        res.json({
+          success: true,
+          emails: result.emails,
+          processingMetadata: result.processingMetadata,
+          inputData: result.inputData,
+          message: 'Emails generated successfully. Use /api/smart-verify to verify and save them.'
+        });
+      } catch (error) {
+        console.error('Error generating emails:', error);
+        res.status(500).json({ error: 'Email generation failed', details: error.message });
       }
-
-      res.json(emails);
     }
 
   } catch (error) {
@@ -349,7 +391,7 @@ app.post('/permute', upload.single('domainFile'), async (req, res) => {
 });
 
 // New function to process multiple domains
-async function processMultipleDomains(formData, domainsFromFile, uploadedFile) {
+async function processMultipleDomains(formData, domainsFromFile, uploadedFile, userId = null) {
   const allDomains = [];
   
   // Add single domain if provided
@@ -536,11 +578,23 @@ Expected format:
   
   console.log(`Total unique emails across all domains: ${uniqueCombinedEmails.length}`);
   
-  // Return both the domain-specific results and the globally sorted emails
-  return {
+  // Return the results without creating a database record
+  const responseData = {
     domainResults: results,
-    globalEmails: uniqueCombinedEmails
+    globalEmails: uniqueCombinedEmails,
+    message: 'Multi-domain processing completed. Use /api/smart-verify to verify and save the emails.'
   };
+  
+  console.log('🔍 Multi-domain response data being sent to client:', {
+    hasGlobalEmails: !!responseData.globalEmails,
+    globalEmailsCount: responseData.globalEmails?.length || 0,
+    hasDomainResults: !!responseData.domainResults,
+    domainResultsCount: responseData.domainResults?.length || 0,
+    message: responseData.message,
+    responseKeys: Object.keys(responseData)
+  });
+  
+  return responseData;
 }
 
 // Fallback data generator for when Perplexity API fails
@@ -557,7 +611,23 @@ function generateFallbackData(domain) {
 // NeverBounce verification endpoint
 app.post('/api/smart-verify', async (req, res) => {
   try {
-    const { emailsWithConfidence, maxEmails = 10 } = req.body;
+    console.log('\n🔍 Smart-verify request received:');
+    console.log('📋 Full request body:', JSON.stringify(req.body, null, 2));
+    console.log('📋 Request headers:', req.headers);
+    
+    const { emailsWithConfidence, maxEmails = 10, inputData, userId, allGeneratedEmails } = req.body;
+    
+    console.log(`\n🔍 Smart-verify request received:`, {
+      emailsCount: emailsWithConfidence?.length || 0,
+      maxEmails,
+      hasInputData: !!inputData,
+      hasAllGeneratedEmails: !!allGeneratedEmails,
+      allGeneratedEmailsCount: allGeneratedEmails?.length || 0,
+      userId: userId || 'NOT PROVIDED',
+      hasEmailsWithConfidence: !!emailsWithConfidence,
+      isArray: Array.isArray(emailsWithConfidence),
+      bodyKeys: Object.keys(req.body || {})
+    });
     
     if (!emailsWithConfidence || !Array.isArray(emailsWithConfidence)) {
       return res.status(400).json({ error: 'emailsWithConfidence array is required' });
@@ -574,10 +644,56 @@ app.post('/api/smart-verify', async (req, res) => {
     // Get usage statistics
     const usageStats = verificationService.getUsageStats();
 
+    // Create EmailGeneration record after verification is complete
+    let createdDocument = null;
+    if (inputData) {
+      try {
+        console.log(`🔍 Creating EmailGeneration record after verification completion`);
+        
+        // Ensure we have a valid domain for the inputData
+        let effectiveDomain = inputData.domain;
+        if (!effectiveDomain && inputData.domainsFromFile && inputData.domainsFromFile.length > 0) {
+          effectiveDomain = inputData.domainsFromFile[0];
+        }
+        
+        // Use allGeneratedEmails if provided, otherwise fall back to emails being verified
+        const allGeneratedEmailsToStore = allGeneratedEmails || emailsWithConfidence;
+        
+        console.log(`📊 Processing ${allGeneratedEmailsToStore.length} total generated emails and ${results.length} verification results`);
+        
+        // Prepare data for the service
+        const documentData = {
+          inputData: {
+            ...inputData,
+            domain: effectiveDomain || 'unknown'
+          },
+          generatedEmails: allGeneratedEmailsToStore,
+          verificationResults: results,
+          processingMetadata: {
+            status: 'verified',
+            totalEmails: allGeneratedEmailsToStore.length,
+            uniqueEmails: new Set(allGeneratedEmailsToStore.map(e => e.email)).size,
+            domainsProcessed: inputData.domainsFromFile ? inputData.domainsFromFile.length : (effectiveDomain ? 1 : 0)
+          }
+        };
+        
+        createdDocument = await emailGenerationService.createAfterVerification(documentData, userId);
+        console.log(`✅ EmailGeneration record created successfully with ID: ${createdDocument._id}`);
+        console.log(`📊 Stored ${allGeneratedEmailsToStore.length} generated emails and ${results.length} verification results`);
+      } catch (dbError) {
+        console.error('❌ Error creating EmailGeneration record:', dbError);
+        // Don't fail the request if database save fails
+      }
+    } else {
+      console.log('⚠️ No inputData provided, skipping database record creation');
+    }
+
     res.json({
       results,
       usageStats,
-      message: `Verified ${results.length} emails using NeverBounce API`
+      message: `Verified ${results.length} emails using NeverBounce API`,
+      documentId: createdDocument ? createdDocument._id : null,
+      createdDocument: createdDocument
     });
 
   } catch (error) {
